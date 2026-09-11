@@ -1,207 +1,234 @@
-# 🌿 Sultan Bazar (সূলতান বাজার) - E-Commerce Platform
+# HydraaZone Server
 
-**Sultan Bazar** is a full-featured, high-performance E-Commerce platform built for selling 100% natural spices, oils, and cooking essentials. Designed with a robust architecture and a beautiful modern user interface, the platform offers a seamless shopping experience for customers and powerful management tools for administrators.
+Backend API for **HydraaZone**, a Node.js/Express/TypeScript e-commerce server built on top of the existing Sultan Bazar codebase. This repository is the **backend only** — there is no frontend in this folder.
 
----
-
-## ✨ Key Features
-
-### 🛒 Core E-Commerce Flow
-- **Product Management**: Support for product tags, categories, descriptions, price management (regular vs. discount prices), and variant tracking.
-- **Shopping Cart**: Real-time cart management synchronized with backend APIs.
-- **Checkout System**: Integrated billing/shipping address forms and payment method processing (e.g., Cash on Delivery).
+> Full requirements, audit notes, and outstanding items live in [`docs/PRD-server.md`](docs/PRD-server.md). Step-by-step build/implementation notes live in [`../claude.md`](../claude.md). This README documents how to run and use the server as it exists today.
 
 ---
 
-### 👥 Multi-Role Dashboards
+## Tech Stack
 
-The application employs a strict **Role-Based Access Control (RBAC)** system with three distinct roles and interfaces: **Customer**, **Admin**, and **Superadmin**.
-
----
-
-#### 🔐 Role-Based Authentication & Authorization
-
-Access to routes, UI elements, and API endpoints is strictly governed by user roles:
-
-| Feature / Action               | Customer | Admin | Superadmin |
-|-------------------------------|----------|-------|------------|
-| Browse & view products        | ✅        | ✅     | ✅          |
-| Place orders                  | ✅        | ❌     | ❌          |
-| Track own orders              | ✅        | ❌     | ❌          |
-| Update profile & address      | ✅        | ✅     | ✅          |
-| Manage products & categories  | ❌        | ✅     | ✅          |
-| Manage all orders             | ❌        | ✅     | ✅          |
-| Manage users                  | ❌        | ✅     | ✅          |
-| Manage admins & global config | ❌        | ❌     | ✅          |
-
-- **JWT-based authentication** with role-embedded tokens
-- **Protected routes** on both frontend (Next.js middleware) and backend (Express middleware)
-- Non-authenticated users can browse products freely but are redirected to `/login` on any purchase action
-- After login/signup, users are returned to their original destination via `location.state.from`
+| Layer | Choice |
+|---|---|
+| Runtime | Node.js (18+) |
+| Framework | Express 5 |
+| Language | TypeScript (strict mode) |
+| Database | MongoDB via Mongoose |
+| Validation | Zod (`validateRequest` middleware, wired per-route) |
+| Auth | JWT (access + refresh tokens), bcrypt password hashing |
+| File uploads | AWS S3 pre-signed URLs (`@aws-sdk/client-s3`) |
+| Transactional email | [Plunk](https://useplunk.com/) HTTP API (not Nodemailer/SMTP) |
+| Security | `helmet`, `express-rate-limit`, a custom Mongo-injection sanitizer |
 
 ---
 
-#### 1. 👤 User Dashboard (Customer)
+## Project Structure & Conventions
 
-![User Orders System](https://i.ibb.co.com/LXH5kxz4/order-user.png)
+```
+src/
+  app.ts                  # Express app: CORS, helmet, sanitizer, route mounting
+  server.ts               # Entry point: Mongo connect + superAdmin seed + listen
+  app/
+    config/                # Typed env var access (single source of truth)
+    db/                    # One-time superAdmin seeding on boot
+    errors/                # AppError + error shape
+    middlewares/           # auth, validateRequest, rateLimiters, sanitizeInput, error handlers
+    routes/index.ts        # Mounts every module's router under /api/v1
+    utils/                 # catchAsync, sendResponse, jwt, sendEmail
+    helpers/               # emailTemplate.ts, metaConversionApi.ts
+    modules/<name>/        # one folder per feature
+      controller.<name>.ts   # thin, wrapped in catchAsync
+      service.<name>.ts      # all business logic + DB access
+      model.<name>.ts        # Mongoose schema, { timestamps: true }
+      interface.<name>.ts    # TypeScript types for the module
+      route.<name>.ts         # (or router.<name>.ts — both spellings exist; match whichever a module already uses)
+      validation.<name>.ts    # Zod schemas
+```
 
-**Order Management**
-- **At-a-glance Stats**: Quick view of Total Orders, Pending, Processing, Shipped, Delivered, and Cancelled orders.
-- **Quick Cancellations**: Cancel orders directly from the dashboard before they are processed.
-
-**🚚 Live Order Status Tracking**
-- A dynamic, visual progress bar (`Placed → Confirmed → Processing → Shipped → Delivered`) that updates in real-time via RTK Query polling (5-second intervals).
-- Each status change is timestamped and logged — customers can see the full journey of their order.
-- Status history is preserved so customers know exactly when their order was confirmed, dispatched, or delivered.
-
-**📧 Email Notifications (Customer)**
-- **Order Confirmation**: Automatic email sent immediately after a successful order is placed, including order number, itemized list, total amount, and estimated delivery.
-- **Shipping Notification**: Email alert sent when an admin marks the order as **Shipped**, including courier details and tracking reference if available.
-- **Delivery Confirmation**: Email sent when order status is updated to **Delivered**.
-
-**⭐ Product Reviews**
-- Customers can leave reviews only for products from **Delivered** orders (enforced server-side).
-- Reviews are submitted from the dedicated "To Review" tab in the dashboard.
-- Each review updates the product's aggregated `rating` and `reviewCount` automatically.
-
-**👤 Account Settings**
-- **Update Profile**: Edit full name, phone number, and profile picture.
-- **Update Password**: Secure password change with current password verification before accepting a new one.
-- **Manage Shipping Addresses**: Add, edit, or remove saved shipping addresses. Set a default address that auto-fills at checkout — no more retyping on every order.
-
-**🔍 Advanced Product Filtering**
-- Filter products by **category**, **price range**, **brand**, **rating**, and **availability**.
-- Sort results by **newest**, **price low to high**, **price high to low**, and **top rated**.
-- Persistent filter state in URL query params — shareable and browser back-button friendly.
-- Text search powered by MongoDB text index across product name, description, and tags.
+**Any new module must follow this exact shape.** Controllers stay thin and are wrapped in `catchAsync`; all responses go through `response.createSendResponse` / `response.getSendResponse` (`utils/sendResponse.ts`); all thrown errors are `AppError` instances, caught by `globalErrorHandler`; every protected route is gated with `auth(USER_ROLE.user, USER_ROLE.admin, USER_ROLE.superAdmin)` naming exactly the roles allowed.
 
 ---
 
-#### 2. 🛠️ Admin Dashboard
-
-![Admin Dashboard](https://i.ibb.co.com/N6mNvpZv/admin-dashboard.png)
-
-**📊 Analytics Hub**
-- Dual-Axis **Sales Composed Chart** (Revenue Area + Order Volume Line graph) tracking trends over time.
-- **Order Status Pie Chart** visually breaking down the lifecycle distribution of current orders.
-- **Financial Metrics**: Real-time revenue calculation aggregating successfully delivered orders.
-
-**📧 Email Notifications (Admin)**
-- **New Order Alert**: Admin receives an instant email notification every time a customer places a new order, including customer name, ordered items, total value, and shipping address.
-- Notifications are sent via a queued email service to avoid blocking the order creation response.
-
-**📦 Product Management**
-- Full **CRUD** for products: create, edit, archive, and delete.
-- **Variant Management**: Add, update, or remove variants (e.g., 250ml, 500ml, 1L) per product including individual pricing, stock levels, SKUs, and images.
-- **Stock Control**: Update stock quantities per variant. Products with zero stock are automatically flagged as unavailable.
-- **Category Assignment**: Assign or reassign products to categories with support for nested category trees.
-- **SEO Fields**: Manage `metaTitle` and `metaDescription` per product for search engine optimization.
-
-**🗂️ Order Management**
-- View and manage all orders with pagination and status-based filtering.
-- Update order status through the full lifecycle: `Pending → Confirmed → Processing → Shipped → Delivered`.
-- Cancel orders with a mandatory reason — stock is automatically restored on cancellation.
-- Every status change is logged to the order's `statusHistory` array with a timestamp.
-
-**👥 User Management**
-- View all registered customers with their order history and account details.
-- Search and filter users by name, email, or registration date.
-- View per-user order summaries directly from the CRM interface.
-
-**⚙️ Admin Settings**
-- Update administrator profile details (name, email, profile image).
-- Manage core store configurations (store name, contact info, free shipping threshold, etc.).
-
-**🔲 Sidebar Navigation**
-- Centralized, sticky navigation drawer (mobile-friendly) linking to:
-  - **Dashboard** — High-level overview & analytics
-  - **Categories & Products** — Inventory control and tag grouping
-  - **Orders** — Full transaction lifecycle management and fulfillment
-  - **Users** — CRM interface to view all registered customers and their history
-  - **Settings** — Store and profile configurations
-
----
-
-#### 3. 🔑 Superadmin Dashboard
-
-- Features all privileges of the standard Admin, plus:
-- Enhanced system-level control and global settings management.
-- Ability to create, manage, and revoke Admin accounts.
-- Oversight of all administrators and their activity logs.
-
----
-
-## 🏗️ System Highlights & Engineering Decisions
-
-1. **Hydration & Reliability**: Next.js hydration boundaries are strictly managed using `suppressHydrationWarning` at the root, preventing third-party browser extensions from crashing the initial DOM render state.
-2. **Real-time UX Strategy**: Instead of heavyweight WebSockets for order tracking, the app utilizes RTK Query's built-in `pollingInterval` on targeted views (like the User's Active Orders). This provides the illusion of real-time updates when an Admin changes a status, without sacrificing server resources.
-3. **Email Notification Queue**: Order confirmation and shipping emails are dispatched via an async queue (Nodemailer + async job), ensuring the API response is never blocked by email delivery latency.
-4. **Advanced Filtering Architecture**: Filters are composed dynamically into MongoDB queries server-side. URL query params drive filter state on the frontend, making filtered views shareable and SEO-friendly.
-5. **Component Reusability**: Complex layouts like `OrdersList` handle their own internal data-tabbing logic cleanly while utilizing highly specific UI sub-components (like `OrderStatusTracker`).
-6. **Optimized Typing**: Complex external library dependencies (like Recharts formatting callbacks) are effectively typed to prevent production-build crashes while retaining strict TS compiler rules elsewhere.
-7. **Stock Integrity**: Stock deduction happens atomically at order placement using MongoDB's `$inc` operator. Cancellations trigger automatic stock restoration, keeping inventory always accurate.
-
----
-
-## 🚀 Tech Stack
-
-### Frontend Architecture
-- **Framework**: [Next.js 16 (App Router)](https://nextjs.org/) — Server-Side Rendering (SSR) & Static Site Generation (SSG) for optimal SEO and performance.
-- **State Management**: [Redux Toolkit (RTK) & RTK Query](https://redux-toolkit.js.org/) — Efficient client state management and real-time backend data fetching with built-in caching and polling mechanisms.
-- **Styling**: [Tailwind CSS](https://tailwindcss.com/) & [shadcn/ui](https://ui.shadcn.com/) — Utility-first styling with accessible, highly customizable UI components.
-- **Data Visualization**: [Recharts](https://recharts.org/) — Dynamic, responsive SVGs for sales and order analytics.
-- **Icons**: [Lucide React](https://lucide.dev/)
-
-### Backend Architecture
-- **Runtime**: [Node.js](https://nodejs.org/) & [Express](https://expressjs.com/)
-- **Database**: [MongoDB](https://www.mongodb.com/) with [Mongoose ODM](https://mongoosejs.com/)
-- **Language**: TypeScript — End-to-end type safety across the entire stack.
-- **Authentication**: JWT (JSON Web Tokens) with role-based routing (Customer, Admin, Superadmin).
-- **Email Service**: [Nodemailer](https://nodemailer.com/) — Transactional emails for order confirmations and shipping notifications.
-
----
-
-## 🏃‍♂️ Running Locally
+## Getting Started
 
 ### Prerequisites
-- Node.js (v18+)
-- MongoDB instance running locally or via MongoDB Atlas
-- Git
-- SMTP credentials for email notifications (Gmail App Password or any SMTP provider)
+- Node.js 18+
+- A MongoDB connection string (Atlas or self-hosted)
+- (Optional, for review-photo/product-image uploads) AWS S3 bucket + IAM credentials
+- (Optional, for transactional email) a [Plunk](https://useplunk.com/) API key
 
-### 1. Backend Setup (`/sultan-bazar-server`)
+### Install & run
+
 ```bash
-cd sultan-bazar-server
 npm install
 
-# Create a .env file and configure the following:
-# PORT=5000
-# DATABASE_URL=mongodb_uri_here
-# JWT_SECRET=your_jwt_secret
-# JWT_EXPIRES_IN=7d
-# SMTP_HOST=smtp.gmail.com
-# SMTP_PORT=587
-# SMTP_USER=your_email@gmail.com
-# SMTP_PASS=your_app_password
-# ADMIN_EMAIL=admin@sultanbazar.com
-# CLIENT_URL=http://localhost:3000
+# copy your own values into .env — see the table below
+cp .env.example .env   # if you keep one; otherwise create .env manually
 
-npm run dev
+npm run dev      # ts-node-dev, auto-restarts on change
+npm run build    # compiles to dist/
+npm start        # runs the compiled build (dist/server.js)
 ```
 
-### 2. Frontend Setup (`/sultan-bazar-client`)
-```bash
-cd sultan-bazar-client
-npm install
+The server listens on `PORT` (default `5000`) and mounts the API under `/api/v1`. On first boot it seeds a `superAdmin` user (`superAdmin@gmail.com`, password from `SUPER_ADMIN_PASS`) if one doesn't already exist.
 
-# Create a .env file pointing to the backend API
-# NEXT_PUBLIC_API_URL=http://localhost:5000/api/v1
+### Environment variables
 
-npm run dev
-```
+| Variable | Required | Notes |
+|---|---|---|
+| `NODE_ENV` | no | `production` enables secure cookies |
+| `PORT` | no | defaults to `5000` |
+| `DATABASE_URL` | **yes** | MongoDB connection string |
+| `BCRYPT_SALT_ROUND` | **yes** | e.g. `12` |
+| `DEFAULT_PASS` | no | unused legacy default, kept for compatibility |
+| `SUPER_ADMIN_PASS` | **yes** | password for the auto-seeded `superAdmin` account |
+| `DEFAULT_USER_PASS` | **yes** | password given to accounts auto-created via guest checkout (currently `123456`) |
+| `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` | **yes** | |
+| `JWT_ACCESS_EXPIRES_IN` / `JWT_REFRESH_EXPIRES_IN` | **yes** | e.g. `1d` / `30d` |
+| `PLUNK_SECRET_KEY` | for email | admin/shipped-order notification emails silently fail without it |
+| `ADMIN_EMAIL` | for email | where new-order notifications are sent |
+| `SITE_URL` | no | base URL used in `/sitemap.xml`; defaults to `https://www.hydraazone.com` |
+| `AWS_S3_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_S3_BUCKET_NAME` | for uploads | **not currently set** — see "Known gaps" below; `POST /uploads/generate-upload-url` will fail without these |
 
-The client will be available at `http://localhost:3000` and the server at `http://localhost:5000`.
+Marketing/tracking IDs (FB Pixel, GA, GTM, WhatsApp number, etc.) and the shipping rate are **not** env vars — they're stored in the database via the `settings` module (see API reference) so they're editable at runtime without a redeploy.
 
 ---
 
-*Built with ❤️ for a seamless, natural shopping experience.*
+## API Reference
+
+Base URL: `/api/v1`. All request bodies are JSON. Authenticated routes expect `Authorization: <accessToken>` (the raw JWT, no `Bearer ` prefix) — set automatically as an httpOnly cookie on login/guest-checkout as well.
+
+Roles: `user` | `admin` | `superAdmin`.
+
+### Auth — `/auth`
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| POST | `/register` | — | rate-limited |
+| POST | `/login` | — | rate-limited |
+| POST | `/guest-checkout` | — | rate-limited; find-or-create by email, see below |
+| POST | `/change-password` | any | rate-limited |
+| POST | `/logout` | — | clears cookies |
+| POST | `/refresh-token` | — | reads `refreshToken` cookie |
+
+**Guest checkout** (`POST /auth/guest-checkout`, body `{ email, fullName, phone }`) lets a first-time customer place an order with no signup step: a brand-new email silently creates an account (password `DEFAULT_USER_PASS`, role `user`) and returns a token. If the email already belongs to an existing account, this endpoint returns `409` and does **not** issue a token — the customer must use `/auth/login` instead, so a known email can never be used to obtain someone else's session without their password.
+
+### Users — `/users`
+| Method | Path | Auth |
+|---|---|---|
+| GET/POST | `/addresses` | any |
+| PATCH/DELETE | `/addresses/:id` | any |
+| PATCH | `/addresses/:id/default` | any |
+| GET | `/me` | any |
+| PATCH | `/me` | any |
+| POST | `/me/change-password` | any |
+| GET | `/` | admin, superAdmin |
+| PATCH | `/:id/role` | superAdmin |
+| PATCH | `/:id/block` | superAdmin |
+| DELETE | `/:id` | superAdmin |
+
+Saved addresses are capped at 5 per user and auto-populated from checkout.
+
+### Categories — `/categories`
+| Method | Path | Auth |
+|---|---|---|
+| GET | `/`, `/:idOrSlug` | — |
+| POST | `/` | admin, superAdmin |
+| PATCH | `/:id`, `/:id/toggle-status` | admin, superAdmin |
+| DELETE | `/:id` | admin, superAdmin |
+
+Includes `metaTitle`/`metaDescription` for SEO.
+
+### Products — `/products`
+| Method | Path | Auth |
+|---|---|---|
+| GET | `/` (search/category/price/status/pagination filters) | — |
+| GET | `/:idOrSlug` | — |
+| POST | `/` | admin, superAdmin |
+| PATCH | `/:id`, `/:id/toggle-featured`, `/:id/variants/:variantId` | admin, superAdmin |
+| DELETE | `/:id` | admin, superAdmin |
+
+Each product has one or more **variants** (name, SKU, price, discount price, stock, images, attributes) — this is how size/weight options are modeled. `rating`/`reviewCount` are aggregate fields maintained by the `review` module, not settable directly.
+
+### Cart — `/carts`
+| Method | Path | Auth |
+|---|---|---|
+| GET, POST, DELETE | `/` | any |
+| PATCH, DELETE | `/:productId/:variantId` | any |
+
+One cart document per user.
+
+### Orders — `/orders`
+| Method | Path | Auth |
+|---|---|---|
+| POST | `/` | any (rate-limited) |
+| GET | `/my-orders` | any — own orders only |
+| GET | `/:orderId` | any — owner or admin/superAdmin |
+| PATCH | `/:orderId/cancel` | user — only while `pending`/`confirmed` |
+| GET | `/analytics/sales?period=daily\|monthly\|yearly` | admin, superAdmin |
+| GET | `/analytics/dashboard` | admin, superAdmin — order count, delivered revenue, low-stock variants |
+| GET | `/` | admin, superAdmin — paginated, filterable |
+| PATCH | `/:orderId/status` | admin, superAdmin |
+| PATCH | `/:orderId/payment-status` | admin, superAdmin |
+
+Placing an order validates stock per variant, snapshots price/SKU onto the order, deducts stock, clears the user's cart, auto-saves the shipping address to their profile, and (fire-and-forget, never blocking the response) sends an admin notification email and a Meta Conversions API `Purchase` event. Shipping cost uses `Settings.shippingRate`/`freeShippingThreshold` when set, falling back to the constants in `order/const.order.ts`. **Payment is COD-only for this build** — `bkash`/`nagad`/`card`/`bank` exist in the schema for later but have no gateway wired up.
+
+### Wishlist — `/wishlist`
+| Method | Path | Auth |
+|---|---|---|
+| GET, POST | `/` | any |
+| DELETE | `/:productId` | any |
+
+### Reviews — `/reviews`
+| Method | Path | Auth |
+|---|---|---|
+| GET | `/product/:productId` | — approved reviews only |
+| POST | `/` | any — see gate below |
+| GET | `/` (optional `?status=`) | admin, superAdmin |
+| PATCH | `/:reviewId/status` | admin, superAdmin |
+
+A review can only be submitted for a product/variant that's actually in an order the requester owns **and** that order's `orderStatus` is `delivered` — this is what makes it a verified purchase. One review per order-item (enforced by a unique index). New reviews start `pending` and don't affect the product's public `rating`; approving/rejecting a review recalculates the product's `rating`/`reviewCount` from the full set of currently-approved reviews.
+
+### Settings — `/settings`
+| Method | Path | Auth |
+|---|---|---|
+| GET | `/` | — public, safe projection only |
+| PATCH | `/` | admin, superAdmin |
+
+Singleton document holding `fbPixelId`, `gaId`, `gtmId`, `searchConsoleTag`, `whatsappNumber`, `messengerPageId`, `shippingRate`, `freeShippingThreshold`, `lowStockThreshold`. `fbConversionApiToken` can be written via `PATCH` but is **never** returned by the public `GET` — it's a server-side secret used only for the Conversions API call.
+
+### Uploads — `/uploads`
+| Method | Path | Auth |
+|---|---|---|
+| POST | `/generate-upload-url` | any |
+
+Returns a pre-signed S3 PUT URL for direct-to-bucket uploads (product images, review photos). Requires the AWS env vars above to be set.
+
+### Sitemap
+`GET /sitemap.xml` — mounted at the app root (not under `/api/v1`), lists active products and categories.
+
+---
+
+## Security
+
+- JWT auth with role checks (`middlewares/auth.ts`), bcrypt-hashed passwords, `passwordChangedAt` invalidates tokens issued before a password change
+- `helmet()` for standard security headers
+- `express-rate-limit` on `/auth/*` and `POST /orders`
+- Zod validation on every mutating route
+- A **custom** Mongo-injection sanitizer (`middlewares/sanitizeInput.ts`) strips `$`-prefixed and dotted keys from `req.body`/`req.params`. The popular `express-mongo-sanitize` package is intentionally **not** used — it reassigns `req.query`, which throws under Express 5 (query is a read-only getter there)
+- CORS allowlist restricted to `hydraazone.com` / `www.hydraazone.com` / `localhost:3000` (`app.ts`)
+
+---
+
+## Deployment
+
+- **Docker**: `Dockerfile` + `docker-compose.yml` build and run the compiled server (`npm run build && npm start`) on port `5000`, reading secrets from `.env`.
+- **Vercel**: `vercel.json` routes all traffic to the compiled `dist/server.js` via `@vercel/node`. Run `npm run build` before deploying (or let Vercel's build step handle it).
+
+---
+
+## Known gaps (not blocking local development)
+
+- `AWS_S3_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_S3_BUCKET_NAME` are not set in `.env` yet — production image hosting is currently imgbb, not S3. See [`docs/PRD-server.md §3.2`](docs/PRD-server.md) for context.
+- No automated test suite yet — verification so far has been manual (`npx tsc --noEmit` + live smoke testing against a real MongoDB instance).
+
+For the full requirements audit, phase-by-phase build history, and what's left, see [`docs/PRD-server.md`](docs/PRD-server.md) and [`../claude.md`](../claude.md).
