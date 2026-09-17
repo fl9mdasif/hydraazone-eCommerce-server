@@ -9,6 +9,7 @@ import { ImageUploads } from '../modules/upload/route.upload';
 import { wishlistRoutes } from '../modules/wishlist/route.wishlist';
 import { settingsRoutes } from '../modules/settings/route.settings';
 import { reviewRoutes } from '../modules/review/route.review';
+import { homepageRoutes } from '../modules/homepage/route.homepage';
 
 const router = Router();
 
@@ -52,6 +53,10 @@ const moduleRoute = [
   {
     path: '/reviews',
     route: reviewRoutes,
+  },
+  {
+    path: '/homepage',
+    route: homepageRoutes,
   },
 ];
 

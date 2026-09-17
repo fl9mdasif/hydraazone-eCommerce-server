@@ -113,10 +113,69 @@ const settingsSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// Mirrors server/src/app/modules/order/model.order.ts exactly.
+const orderItemSchema = new mongoose.Schema({
+  product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
+  variant: {
+    variantId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    name: { type: String, required: true },
+    sku: { type: String, required: true },
+    price: { type: Number, required: true },
+    discountPrice: Number,
+  },
+  quantity: { type: Number, required: true, min: 1 },
+  totalPrice: { type: Number, required: true },
+  isReviewed: { type: Boolean, default: false },
+});
+
+const shippingAddressSchema = new mongoose.Schema({
+  fullName: { type: String, required: true },
+  phone: { type: String, required: true },
+  address: { type: String, required: true },
+  city: { type: String, required: true },
+  district: { type: String, required: true },
+  postalCode: String,
+  country: { type: String, default: 'Bangladesh' },
+});
+
+const orderSchema = new mongoose.Schema(
+  {
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    orderNumber: { type: String, required: true, unique: true },
+    items: { type: [orderItemSchema], required: true },
+    shippingAddress: { type: shippingAddressSchema, required: true },
+    paymentMethod: { type: String, enum: ['cod', 'bkash', 'nagad', 'card', 'bank'], required: true },
+    paymentStatus: { type: String, enum: ['pending', 'paid', 'failed', 'refunded'], default: 'pending' },
+    transactionId: String,
+    subtotal: { type: Number, required: true },
+    shippingCharge: { type: Number, default: 0 },
+    discount: { type: Number, default: 0 },
+    totalAmount: { type: Number, required: true },
+    orderStatus: {
+      type: String,
+      enum: ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled', 'returned'],
+      default: 'pending',
+    },
+    statusHistory: [
+      {
+        status: { type: String, required: true },
+        note: String,
+        changedAt: { type: Date, default: Date.now },
+      },
+    ],
+    deliveredAt: Date,
+    cancelledAt: Date,
+    cancelReason: String,
+    note: String,
+  },
+  { timestamps: true },
+);
+
 const User = mongoose.model('User', userSchema);
 const Category = mongoose.model('Category', categorySchema);
 const Product = mongoose.model('Product', productSchema);
 const Settings = mongoose.model('Settings', settingsSchema);
+const Order = mongoose.model('Order', orderSchema);
 
 /* --------------------------------------------------------------- seed data */
 
@@ -429,6 +488,16 @@ const ACCOUNTS = [
     role: 'superAdmin',
     contactNumber: '01700000001',
   },
+  // Plain `admin` role, distinct from the superAdmin account above — needed
+  // to test the dashboard's role-scoping (admin should NOT see the Users
+  // nav item or reach /dashboard/superadmin).
+  {
+    username: 'hydraa_manager',
+    email: 'manager@hydraazone.com',
+    password: 'Manager@123',
+    role: 'admin',
+    contactNumber: '01700000003',
+  },
   {
     username: 'hydraa_customer',
     email: 'customer@hydraazone.com',
@@ -508,6 +577,116 @@ async function main() {
       password: await bcrypt.hash(account.password, rounds),
     });
     console.log(`account   ${account.email} / ${account.password} [${account.role}]`);
+  }
+
+  /*
+   * Historical delivered orders, spread over the past 30 days.
+   *
+   * Without this, the admin dashboard's revenue chart has at most one real
+   * data point (whatever orders happen to exist from manual testing) — a
+   * single point has no line to draw, just a dot. This gives
+   * `GET /orders/analytics/sales` a genuine multi-day time series to plot,
+   * built entirely from real seeded products/variants and their real
+   * prices — nothing here is a fabricated number once it lands in the DB,
+   * it's a real Order document like any other, just backdated.
+   *
+   * Idempotent like everything else here: deterministic `orderNumber`s
+   * (`SEED-ORD-0001` etc.) mean a re-run upserts the same 24 orders rather
+   * than piling up duplicates.
+   */
+  const customer = await User.findOne({ email: 'customer@hydraazone.com' });
+  const allProducts = await Product.find({ status: 'active' });
+
+  if (customer && allProducts.length > 0) {
+    const SEED_ORDER_COUNT = 24;
+    const now = Date.now();
+    const DAY_MS = 24 * 60 * 60 * 1000;
+
+    for (let i = 0; i < SEED_ORDER_COUNT; i += 1) {
+      const orderNumber = `SEED-ORD-${String(i + 1).padStart(4, '0')}`;
+      const existing = await Order.findOne({ orderNumber });
+      if (existing) continue;
+
+      // Spread across the last 30 days, 1-2 orders per day, so both the
+      // "daily" and "monthly" analytics periods have something real to show.
+      const daysAgo = Math.floor((i / SEED_ORDER_COUNT) * 30);
+      const createdAt = new Date(now - daysAgo * DAY_MS - Math.floor(Math.random() * DAY_MS));
+
+      // 1-3 line items from the real catalogue, real prices.
+      const itemCount = 1 + Math.floor(Math.random() * 3);
+      const items = [];
+      let subtotal = 0;
+
+      for (let j = 0; j < itemCount; j += 1) {
+        const product = allProducts[Math.floor(Math.random() * allProducts.length)];
+        const variant = product.variants[Math.floor(Math.random() * product.variants.length)];
+        if (!variant) continue;
+
+        const quantity = 1 + Math.floor(Math.random() * 2);
+        const price = variant.discountPrice ?? variant.price;
+        const totalPrice = price * quantity;
+        subtotal += totalPrice;
+
+        items.push({
+          product: product._id,
+          variant: {
+            variantId: variant._id,
+            name: variant.name,
+            sku: variant.sku,
+            price: variant.price,
+            discountPrice: variant.discountPrice,
+          },
+          quantity,
+          totalPrice,
+          isReviewed: false,
+        });
+      }
+
+      if (items.length === 0) continue;
+
+      const shippingCharge = subtotal >= 10000 ? 0 : 60;
+      const totalAmount = subtotal + shippingCharge;
+      const deliveredAt = new Date(createdAt.getTime() + 2 * DAY_MS);
+
+      const order = new Order({
+        user: customer._id,
+        orderNumber,
+        items,
+        shippingAddress: {
+          fullName: 'Hydraa Customer',
+          phone: '01700000002',
+          address: 'House 12, Road 5, Block C',
+          city: 'Dhaka',
+          district: 'Dhaka',
+          postalCode: '1216',
+          country: 'Bangladesh',
+        },
+        paymentMethod: 'cod',
+        // A mix, so the admin dashboard's payment-status donut has more
+        // than one real slice instead of everything landing in one bucket.
+        paymentStatus: ['paid', 'paid', 'paid', 'pending', 'refunded'][i % 5],
+        subtotal,
+        shippingCharge,
+        discount: 0,
+        totalAmount,
+        orderStatus: 'delivered',
+        statusHistory: [
+          { status: 'pending', note: 'Order placed', changedAt: createdAt },
+          { status: 'delivered', note: 'Delivered', changedAt: deliveredAt },
+        ],
+        deliveredAt,
+      });
+
+      // Backdate createdAt/updatedAt — Mongoose only auto-sets these when
+      // absent, so setting them before save() makes the seed data actually
+      // land on the days it claims to.
+      order.createdAt = createdAt;
+      order.updatedAt = deliveredAt;
+      await order.save({ timestamps: false });
+    }
+    console.log(`orders    ${SEED_ORDER_COUNT} historical delivered orders (idempotent)`);
+  } else {
+    console.log('orders    skipped (no customer account or no active products yet)');
   }
 
   /* settings singleton */
